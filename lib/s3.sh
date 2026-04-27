@@ -16,6 +16,17 @@ aws_cli() {
     with_aws_env aws "${args[@]}" "$@"
 }
 
+s3_storage_class_supported_by_aws_cli() {
+    case "${S3_STORAGE_CLASS:-}" in
+        ""|STANDARD|REDUCED_REDUNDANCY|STANDARD_IA|ONEZONE_IA|INTELLIGENT_TIERING|GLACIER|DEEP_ARCHIVE|GLACIER_IR)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 check_s3_access() {
     if ! command_exists aws; then
         echo "Не найден aws cli. Установите: pip3 install awscli" >&2
@@ -33,9 +44,11 @@ check_s3_write_delete() {
     local tmp
     tmp="$(mktemp)"
     echo "Backup-S3 health-check $(iso_now)" > "$tmp"
-    if ! aws_cli s3 cp "$tmp" "s3://${S3_BUCKET}/${test_key}" >/dev/null 2>&1; then
+    local aws_error
+    if ! aws_error="$(aws_cli s3 cp "$tmp" "s3://${S3_BUCKET}/${test_key}" 2>&1)"; then
         rm -f "$tmp"
         echo "Не удалось записать тестовый объект в S3 bucket." >&2
+        echo "$aws_error" >&2
         return "$EXIT_S3"
     fi
     aws_cli s3 rm "s3://${S3_BUCKET}/${test_key}" >/dev/null 2>&1 || true
@@ -64,9 +77,19 @@ upload_file_to_s3() {
     fi
 
     if command_exists pv && [ "$size" -gt 0 ] && [ "${PROGRESS_MODE:-auto}" != "off" ]; then
-        pv -f -s "$size" -N "S3 UPLOAD" "$file" | aws_cli s3 cp - "$target" --expected-size "$size" --storage-class "$S3_STORAGE_CLASS"
+        if s3_storage_class_supported_by_aws_cli; then
+            pv -f -s "$size" -N "S3 UPLOAD" "$file" | aws_cli s3 cp - "$target" --expected-size "$size" --storage-class "$S3_STORAGE_CLASS"
+        else
+            log_warn "awscli не поддерживает storage class '${S3_STORAGE_CLASS}', загрузка выполняется без --storage-class."
+            pv -f -s "$size" -N "S3 UPLOAD" "$file" | aws_cli s3 cp - "$target" --expected-size "$size"
+        fi
     else
-        aws_cli s3 cp "$file" "$target" --storage-class "$S3_STORAGE_CLASS"
+        if s3_storage_class_supported_by_aws_cli; then
+            aws_cli s3 cp "$file" "$target" --storage-class "$S3_STORAGE_CLASS"
+        else
+            log_warn "awscli не поддерживает storage class '${S3_STORAGE_CLASS}', загрузка выполняется без --storage-class."
+            aws_cli s3 cp "$file" "$target"
+        fi
     fi
     log_success "Файл загружен: $target"
 }
