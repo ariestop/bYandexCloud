@@ -52,10 +52,7 @@ venv/
 .DS_Store
 
 # Cursor / AI local
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/*.mdc
-.cursor/rules/*.local.mdc
+.cursor/
 .cursorrules.local
 AGENTS.md
 AGENTS.local.md
