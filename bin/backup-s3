@@ -49,7 +49,7 @@ usage() {
 Backup-S3 — резервное копирование сайтов, директорий и баз данных в S3-совместимое хранилище.
 
 Использование:
-  backup-s3                    открыть интерактивное TUI-меню
+  backup-s3                    выполнить бэкап сейчас (текстовый режим)
   backup-s3 --run              выполнить бэкап сейчас
   backup-s3 --background       запустить бэкап в фоне
   backup-s3 --status           показать статус текущего бэкапа
@@ -264,7 +264,7 @@ edit_config() {
 }
 
 main() {
-    local cmd="${1:---tui}"
+    local cmd="${1:---run}"
     case "$cmd" in
         --run) run_backup ;;
         --background) start_background_service_or_nohup ;;
