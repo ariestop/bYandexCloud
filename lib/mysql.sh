@@ -24,8 +24,8 @@ mysqldump_cmd() {
 estimate_mysql_db_size() {
     local mysql_cmd
     mysql_cmd="$(mysql_client_cmd)"
-    MYSQL_PWD="${DB_PASS:-}" "$mysql_cmd" \
-        --user="$DB_USER" --host="$DB_HOST" --port="$DB_PORT" \
+    "$mysql_cmd" \
+        --user="$DB_USER" --password="$DB_PASS" --host="$DB_HOST" --port="$DB_PORT" \
         --batch --skip-column-names -e \
         "SELECT COALESCE(SUM(data_length + index_length),0) FROM information_schema.tables WHERE table_schema='${DB_NAME//\'/\'\'}';" 2>/dev/null || echo 0
 }
@@ -33,8 +33,8 @@ estimate_mysql_db_size() {
 check_mysql_access() {
     local mysql_cmd
     mysql_cmd="$(mysql_client_cmd)"
-    if ! MYSQL_PWD="${DB_PASS:-}" "$mysql_cmd" \
-        --user="$DB_USER" --host="$DB_HOST" --port="$DB_PORT" \
+    if ! "$mysql_cmd" \
+        --user="$DB_USER" --password="$DB_PASS" --host="$DB_HOST" --port="$DB_PORT" \
         --batch --skip-column-names -e "SELECT 1;" "$DB_NAME" >/dev/null 2>&1; then
         echo "Нет доступа к MySQL/MariaDB. Проверьте DB_USER, DB_PASS, DB_HOST, DB_PORT и права пользователя." >&2
         return "$EXIT_DB"
@@ -57,14 +57,14 @@ dump_mysql_database() {
     set_operation_progress "Дамп БД" 0 "$estimated_size" "" ""
 
     if command_exists pv && [ "$estimated_size" -gt 0 ] && [ "${PROGRESS_MODE:-auto}" != "off" ]; then
-        MYSQL_PWD="${DB_PASS:-}" "$dump_cmd" \
-            --user="$DB_USER" --host="$DB_HOST" --port="$DB_PORT" \
+        "$dump_cmd" \
+            --user="$DB_USER" --password="$DB_PASS" --host="$DB_HOST" --port="$DB_PORT" \
             --single-transaction --quick --routines --triggers --events "$DB_NAME" \
             | pv -f -s "$estimated_size" -N "DB DUMP" \
             | gzip -c > "$output"
     else
-        MYSQL_PWD="${DB_PASS:-}" "$dump_cmd" \
-            --user="$DB_USER" --host="$DB_HOST" --port="$DB_PORT" \
+        "$dump_cmd" \
+            --user="$DB_USER" --password="$DB_PASS" --host="$DB_HOST" --port="$DB_PORT" \
             --single-transaction --quick --routines --triggers --events "$DB_NAME" \
             | gzip -c > "$output"
     fi
