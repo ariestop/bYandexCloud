@@ -57,6 +57,7 @@ venv/
 !.cursor/rules/*.mdc
 .cursor/rules/*.local.mdc
 .cursorrules.local
+AGENTS.md
 AGENTS.local.md
 CLAUDE.local.md
 *.local.md
