@@ -1,0 +1,66 @@
+# секреты
+.env
+*.env
+!.env.example
+*.key
+*.pem
+*.secret
+*.credentials
+config/*.env
+!config/*.env.example
+config/*.local
+config/*secret*
+/etc/
+
+# бэкапы
+*.tar
+*.tar.gz
+*.tgz
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.bak
+/backups/
+/backup/
+/tmp/
+/opt/
+
+# логи
+*.log
+logs/*
+!logs/.gitkeep
+
+# runtime
+*.pid
+*.lock
+status.json
+state.json
+/var/
+/run/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.envrc
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Cursor / AI local
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/*.mdc
+.cursor/rules/*.local.mdc
+.cursorrules.local
+AGENTS.local.md
+CLAUDE.local.md
+*.local.md
+.ai/
+.agent/
+prompts/private/
+prompts/local/

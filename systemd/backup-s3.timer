@@ -1,0 +1,10 @@
+[Unit]
+Description=Ежедневный запуск Backup-S3
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=backup-s3.service
+
+[Install]
+WantedBy=timers.target

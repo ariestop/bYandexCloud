@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup-S3 резервное копирование в S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup-s3 --run
+User=root
+Group=root

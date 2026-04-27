@@ -1,0 +1,12 @@
+* text=auto
+
+*.sh text eol=lf
+bin/backup-s3 text eol=lf
+tests/*.sh text eol=lf
+scripts/*.sh text eol=lf
+lib/*.sh text eol=lf
+systemd/* text eol=lf
+*.md text eol=lf
+*.mdc text eol=lf
+*.py text eol=lf
+*.example text eol=lf

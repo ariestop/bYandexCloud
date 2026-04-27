@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${BIN_DIR}/.." && pwd)"
+if [ -f "${REPO_ROOT}/lib/common.sh" ]; then
+    LIB_DIR="${REPO_ROOT}/lib"
+else
+    LIB_DIR="${BACKUP_S3_LIB_DIR:-/usr/local/lib/backup-s3}"
+fi
+
+# shellcheck disable=SC1091
+. "${LIB_DIR}/common.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/logger.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/config.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/secrets.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/status.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/progress.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/mysql.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/postgres.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/archive.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/s3.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/checks.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/cleanup.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/meta.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/verify.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/systemd.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/tui_fallback.sh"
+# shellcheck disable=SC1091
+. "${LIB_DIR}/tui.sh"
+
+usage() {
+    cat <<'HELP'
+Backup-S3 — резервное копирование сайтов, директорий и баз данных в S3-совместимое хранилище.
+
+Использование:
+  backup-s3                    открыть интерактивное TUI-меню
+  backup-s3 --run              выполнить бэкап сейчас
+  backup-s3 --background       запустить бэкап в фоне
+  backup-s3 --status           показать статус текущего бэкапа
+  backup-s3 --status-json      вывести status.json
+  backup-s3 --logs             смотреть последний лог в реальном времени
+  backup-s3 --check            проверить конфиг, зависимости, БД, S3 и место
+  backup-s3 --dry-run          показать план без загрузки в облако
+  backup-s3 --tui              открыть TUI-меню
+  backup-s3 --version          показать версию
+  backup-s3 --help             показать эту справку
+  backup-s3 --install-systemd  установить systemd service
+  backup-s3 --install-timer    установить systemd timer
+  backup-s3 --enable-timer     включить ежедневный автозапуск
+  backup-s3 --disable-timer    отключить ежедневный автозапуск
+  backup-s3 --timer-status     показать статус timer
+  backup-s3 --list-local       показать локальные бэкапы
+  backup-s3 --list-remote      показать бэкапы в S3
+  backup-s3 --verify-last      проверить целостность последнего локального бэкапа
+  backup-s3 --show-config      показать конфигурацию с маскировкой секретов
+  backup-s3 --edit-config      открыть конфиг в редакторе
+  backup-s3 --last-result      показать последний результат из state.json
+
+Конфиг по умолчанию:
+  /etc/backup-s3/backup-s3.env
+
+Можно указать другой конфиг:
+  BACKUP_S3_CONFIG=/path/to/backup-s3.env backup-s3 --check
+HELP
+}
+
+acquire_lock() {
+    ensure_state_dirs
+    local lock_file="${RUNTIME_DIR}/backup.lock"
+    if [ -f "$lock_file" ]; then
+        local old_pid
+        old_pid="$(sed -n '1p' "$lock_file" 2>/dev/null || true)"
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" >/dev/null 2>&1; then
+            echo "Ошибка: другой бэкап уже выполняется. PID: $old_pid" >&2
+            return "$EXIT_LOCKED"
+        fi
+        echo "Предупреждение: найден зависший lock-файл, он будет заменён: $lock_file" >&2
+    fi
+    echo "$$" > "$lock_file"
+}
+
+run_pre_command() {
+    if [ -n "${PRE_BACKUP_COMMAND:-}" ]; then
+        log_info "Выполняется PRE_BACKUP_COMMAND."
+        bash -c "$PRE_BACKUP_COMMAND"
+    fi
+}
+
+run_post_command() {
+    if [ -n "${POST_BACKUP_COMMAND:-}" ]; then
+        log_info "Выполняется POST_BACKUP_COMMAND."
+        if ! bash -c "$POST_BACKUP_COMMAND"; then
+            log_warn "POST_BACKUP_COMMAND завершился с ошибкой, но бэкап уже загружен."
+        fi
+    fi
+}
+
+handle_backup_error() {
+    local rc="${1:-1}"
+    log_error "Бэкап завершился ошибкой с кодом ${rc}."
+    write_status "error" "Ошибка" "$CURRENT_STAGE_NO" "$TOTAL_STAGES" "$((CURRENT_STAGE_NO * 100 / TOTAL_STAGES))" "Ошибка" "" 0 0 "" "" "Код ошибки ${rc}"
+    write_state "error" "Код ошибки ${rc}" "${CURRENT_BACKUP_DIR:-}"
+    cleanup_lock
+    exit "$rc"
+}
+
+run_backup() {
+    require_root
+    BACKUP_TS="$(timestamp)"
+    BACKUP_STARTED_AT="$(iso_now)"
+    export BACKUP_PID="$$"
+    load_config
+    init_logging
+    trap 'handle_backup_error "$?"' ERR
+    trap 'cleanup_lock' EXIT
+
+    log_info "Запуск Backup-S3. Профиль: ${BACKUP_PROFILE_NAME}. Сайт: ${SITE_NAME:-не задано}."
+    if ! bool_true "${ENCRYPT_BACKUP:-false}"; then
+        log_warn "Шифрование архивов выключено ENCRYPT_BACKUP=false."
+    fi
+
+    set_stage "Инициализация"
+    acquire_lock
+
+    set_stage "Загрузка конфигурации"
+    check_config_permissions "$CONFIG_FILE"
+    validate_required_config
+
+    set_stage "Проверка зависимостей"
+    check_dependencies >/dev/null
+
+    set_stage "Проверка свободного места"
+    check_free_space >/dev/null
+
+    set_stage "Проверка базы данных"
+    check_database_access >/dev/null
+
+    set_stage "Проверка S3"
+    check_s3_access >/dev/null
+
+    set_stage "Создание локальной папки бэкапа"
+    local profile_safe
+    profile_safe="$(sanitize_name "${BACKUP_PROFILE_NAME:-default}")"
+    CURRENT_BACKUP_DIR="${BACKUP_ROOT}/${profile_safe}_${BACKUP_TS}"
+    CURRENT_S3_TARGET="$(backup_s3_dir "$BACKUP_TS")"
+    ensure_dir "$CURRENT_BACKUP_DIR"
+    chmod 700 "$CURRENT_BACKUP_DIR"
+    log_info "Локальная директория бэкапа: $CURRENT_BACKUP_DIR"
+    log_info "S3 target: $CURRENT_S3_TARGET"
+
+    set_stage "PRE_BACKUP_COMMAND"
+    run_pre_command
+
+    local artifacts=()
+    if bool_true "${DB_ENABLED:-false}"; then
+        set_stage "Дамп базы данных"
+        local db_file
+        case "${DB_TYPE:-mysql}" in
+            mysql|mariadb) db_file="$(dump_mysql_database "$CURRENT_BACKUP_DIR" "$BACKUP_TS")" ;;
+            postgres) db_file="$(dump_postgres_database "$CURRENT_BACKUP_DIR" "$BACKUP_TS")" ;;
+            *) log_error "Неподдерживаемый DB_TYPE: $DB_TYPE"; return "$EXIT_CONFIG" ;;
+        esac
+        artifacts+=("$db_file")
+    else
+        set_stage "Дамп базы данных пропущен"
+        log_info "DB_ENABLED=false, дамп БД не создаётся."
+    fi
+
+    set_stage "Архивация SITE_DIR"
+    local site_archive
+    site_archive="$(create_site_archive "$CURRENT_BACKUP_DIR" "$BACKUP_TS")"
+    artifacts+=("$site_archive")
+
+    set_stage "Архивация EXTRA_PATHS"
+    local extra_archive=""
+    extra_archive="$(create_extra_paths_archive "$CURRENT_BACKUP_DIR" "$BACKUP_TS" || true)"
+    [ -n "$extra_archive" ] && artifacts+=("$extra_archive")
+
+    set_stage "Создание SHA256SUMS.txt"
+    local checksum_file
+    checksum_file="$(create_checksums "$CURRENT_BACKUP_DIR")"
+    artifacts+=("$checksum_file")
+
+    set_stage "Создание backup_meta.json"
+    local started_epoch now_epoch duration meta_file
+    started_epoch="$(date -d "${BACKUP_STARTED_AT}" '+%s' 2>/dev/null || date '+%s')"
+    now_epoch="$(date '+%s')"
+    duration="$((now_epoch - started_epoch))"
+    meta_file="$(create_backup_meta "$CURRENT_BACKUP_DIR" "$BACKUP_TS" "success" "$duration" "${artifacts[@]}")"
+    artifacts+=("$meta_file")
+
+    set_stage "Опциональное шифрование файлов"
+    if bool_true "${ENCRYPT_BACKUP:-false}"; then
+        local encrypted=()
+        local artifact encrypted_file
+        for artifact in "${artifacts[@]}"; do
+            encrypted_file="$(encrypt_file_if_needed "$artifact")"
+            encrypted+=("$encrypted_file")
+        done
+        artifacts=("${encrypted[@]}")
+        checksum_file="$(create_checksums "$CURRENT_BACKUP_DIR")"
+        artifacts+=("$checksum_file")
+    fi
+
+    set_stage "Загрузка файлов в S3"
+    upload_files_to_s3 "${artifacts[@]}"
+
+    set_stage "Проверка файлов в S3"
+    verify_remote_files "${artifacts[@]}"
+
+    set_stage "POST_BACKUP_COMMAND"
+    run_post_command
+
+    set_stage "Локальная очистка старых бэкапов"
+    cleanup_old_local_backups
+
+    set_stage "Обновление state.json"
+    write_state "success" "Бэкап успешно завершён" "$meta_file"
+
+    set_stage "Итоговый отчёт"
+    write_status "success" "Готово" "$TOTAL_STAGES" "$TOTAL_STAGES" 100 "Бэкап завершён" "100%" 0 0 "" "" ""
+    log_success "Бэкап успешно завершён."
+    echo
+    echo "Итоговый отчёт Backup-S3"
+    echo "Статус: успешно"
+    echo "Длительность: ${duration} сек."
+    echo "Локальная директория: $CURRENT_BACKUP_DIR"
+    echo "S3 target: $CURRENT_S3_TARGET"
+    echo "Лог: $LOG_FILE"
+    echo "Метаданные: $meta_file"
+}
+
+tail_latest_log() {
+    load_config || true
+    local latest
+    latest="$(find "${LOG_DIR:-/var/log/backup-s3}" -type f -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print}')"
+    if [ -z "$latest" ]; then
+        echo "Логи не найдены."
+        return 0
+    fi
+    echo "Лог: $latest"
+    tail -f "$latest"
+}
+
+edit_config() {
+    load_config || true
+    open_editor_for_config
+}
+
+main() {
+    local cmd="${1:---tui}"
+    case "$cmd" in
+        --run) run_backup ;;
+        --background) start_background_service_or_nohup ;;
+        --status) load_config || true; show_status_pretty ;;
+        --status-json) load_config || true; show_status_json ;;
+        --logs) tail_latest_log ;;
+        --check) run_health_check ;;
+        --dry-run) export DRY_RUN="true"; dry_run_report ;;
+        --tui) run_tui ;;
+        --version) print_version ;;
+        --help|-h) usage ;;
+        --install-systemd) install_systemd_service ;;
+        --install-timer) install_systemd_timer ;;
+        --enable-timer) enable_systemd_timer ;;
+        --disable-timer) disable_systemd_timer ;;
+        --timer-status) show_timer_status ;;
+        --list-local) list_local_backups ;;
+        --list-remote) list_remote_backups ;;
+        --verify-last) verify_last_local_backup ;;
+        --show-config) load_config && show_effective_config_masked ;;
+        --edit-config) edit_config ;;
+        --last-result) load_config || true; show_last_result ;;
+        *) echo "Неизвестный аргумент: $cmd" >&2; usage; exit "$EXIT_GENERAL" ;;
+    esac
+}
+
+main "$@"
